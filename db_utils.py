@@ -22,6 +22,7 @@ DB_CONFIG = {
     "port": os.getenv("DB_PORT")
 }
 
+# Initialize the connection pool
 def init_db_pool():
     global connection_pool
     if connection_pool is None:
@@ -58,6 +59,7 @@ def adapt_date(date_obj):
 
 # Create a new table for interns if it doesn't exist (should only be done once for initial setup) 
 # and updates arrival of new interns by editing interns_new.csv
+
 def create_interns_table_from_csv(csv_file_path):
     import csv
     import pandas as pd
@@ -116,6 +118,7 @@ def create_interns_table_from_csv(csv_file_path):
         conn.commit()
         print("Updated status to 'Completed' for interns whose end date has passed.")
 
+        # Have to edit the CSV file to match the expected column names in case of any changes
         mappings = {
             'name': 'Name of Intern',
             'telegram_handle': 'Telegram Handle',
@@ -124,18 +127,21 @@ def create_interns_table_from_csv(csv_file_path):
             'supervisor_email': 'Supervisor Email',
             'al_entitlement': 'Bal Vacation Leave Taken',
             'mc_entitlement': 'Bal Medical Leave',
-            'oil_entitlement': 'Balance OIL Taken'  # Added OIL mapping
+            'oil_entitlement': 'Balance OIL Taken'  
         }
 
         df = pd.read_csv(csv_file_path)
-        df = df.dropna(subset=['Telegram Handle'])
-        print(df[['Name of Intern', 'Telegram Handle', 'AL', 'MC', 'OIL']], flush=True)  # Added OIL to print statement
 
+        # drop rows where 'Telegram Handle' is NaN
+        df = df.dropna(subset=['Telegram Handle'])
+        
+        # Set date to correct format
         df['start_date'] = pd.to_datetime(df[mappings['start_date']].str.strip(), format="%d-%b-%y").dt.strftime("%Y-%m-%d")
         df['end_date'] = pd.to_datetime(df[mappings['end_date']].str.strip(), format="%d-%b-%y").dt.strftime("%Y-%m-%d")
 
         processed_interns = set()
 
+        # Iterate through the DataFrame and process each intern --> This part handles the logic of checking for duplicates and updating or inserting records
         for _, row in df.iterrows():
             telegram_handle = row[mappings['telegram_handle']].strip()
             start_date = row['start_date']
@@ -148,10 +154,16 @@ def create_interns_table_from_csv(csv_file_path):
 
             processed_interns.add(intern_key)
 
+            # Checks if intern period and status will be adjusted accordingly
             new_start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
             new_end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
             today = datetime.now().date()
-            current_status = 'Active' if new_end_date >= today else 'Completed'
+            if new_start_date > today:
+                current_status = 'Pending Start'
+            elif new_end_date >= today:
+                current_status = 'Active'
+            else:
+                current_status = 'Completed'
 
             al_entitlement = float(row[mappings['al_entitlement']]) if pd.notna(row[mappings['al_entitlement']]) else 0
             mc_entitlement = float(row[mappings['mc_entitlement']]) if pd.notna(row[mappings['mc_entitlement']]) else 0
@@ -160,6 +172,7 @@ def create_interns_table_from_csv(csv_file_path):
             # Added oil entitlement
             oil_entitlement = float(row[mappings['oil_entitlement']]) if pd.notna(row[mappings['oil_entitlement']]) else 0
 
+            # Check if the intern already exists with the same telegram handle and dates
             cursor.execute("""
                 SELECT id, al_taken, mc_taken, compassionate_taken, oil_taken, status
                 FROM interns_new 
@@ -170,6 +183,7 @@ def create_interns_table_from_csv(csv_file_path):
 
             exact_match = cursor.fetchone()
 
+            # If an exact match is found, update the record
             if exact_match:
                 intern_id = exact_match[0]
                 al_taken = float(exact_match[1] or 0)
@@ -184,6 +198,7 @@ def create_interns_table_from_csv(csv_file_path):
                 # Calculate oil balance
                 oil_balance = oil_entitlement - oil_taken
 
+                
                 print(f"Updating exact match record for {telegram_handle} ({start_date} to {end_date})")
                 cursor.execute("""
                     UPDATE interns_new
@@ -238,7 +253,7 @@ def create_interns_table_from_csv(csv_file_path):
                 """, (telegram_handle,))
                 existing_intern = cursor.fetchone()
 
-                if existing_intern and existing_intern[5] == 'Active':  # Updated index for status
+                if existing_intern and (existing_intern[5] == 'Active' or existing_intern[5] == 'Pending Start'):  # Updated index for status
                     intern_id = existing_intern[0]
                     al_taken = float(existing_intern[1] or 0)
                     mc_taken = float(existing_intern[2] or 0)
@@ -285,6 +300,7 @@ def create_interns_table_from_csv(csv_file_path):
                         current_status,
                         intern_id
                     ))
+
                 else:
                     # For new records, taken values are 0 by default
                     al_balance = al_entitlement
@@ -339,7 +355,7 @@ def create_interns_table_from_csv(csv_file_path):
         print(f"Database error: {e}")
         return False
 
-
+# This function creates a new table for leave logs if it doesn't exist
 def create_leave_logs_new():
     conn = None
     try:
@@ -386,6 +402,7 @@ def create_leave_logs_new():
 create_interns_table_from_csv(os.getenv("INTERNS_DB"))
 create_leave_logs_new()        
 
+# This function retrieves all registered interns and their IDs
 def get_registered_interns():
     conn = None
     try:
@@ -401,6 +418,7 @@ def get_registered_interns():
         if conn:
             release_connection(conn)
 
+# This function retrieves intern information by their Telegram handle
 def get_intern_by_telegram(telegram_handle):
     conn = None
     try:
@@ -433,6 +451,7 @@ def get_intern_by_telegram(telegram_handle):
         if conn:
             release_connection(conn)
 
+# This function updates the leave balance in the database
 def update_leave_balance(username, balance_type, leave_duration, taken_type):
     conn = None
     try:
@@ -486,6 +505,7 @@ def update_leave_taken(username, leave_duration, taken_type):
         if conn:
             release_connection(conn)
 
+# This function saves a leave application to the database after intern take leave
 def save_leave_application(application):
     print("Function called with application:", application['id'])  # Debug at start
     conn = None
@@ -525,6 +545,7 @@ def save_leave_application(application):
         if conn:
             conn.close()
 
+# This function retrieves the status of a leave application by its ID
 def get_leave_application(application_id):
     conn = None
     try:
@@ -542,6 +563,7 @@ def get_leave_application(application_id):
         if conn:
             release_connection(conn)
 
+# This function retrieves all approved leaves for a given intern by their Telegram handle
 def get_approved_leaves(telegram_handle):
     conn = None
     try:
@@ -578,6 +600,7 @@ def get_approved_leaves(telegram_handle):
         if conn:
             release_connection(conn)
 
+# This function cancels a leave application and restores the leave balance
 def cancel_leave_application(application_id, telegram_handle):
     conn = None
     try:
@@ -645,6 +668,36 @@ def cancel_leave_application(application_id, telegram_handle):
         if conn:
             conn.rollback()
         print(f"Database error when cancelling leave: {e}")
+        return False
+    finally:
+        if conn:
+            release_connection(conn)
+
+# This function deletes a user from the interns_new and leave_logs_new tables (for admin and coding use whenever needed)
+def delete_user(telegram_handle):
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Delete from interns_new table
+        cursor.execute("""
+            DELETE FROM interns_new 
+            WHERE telegram_handle = %s
+        """, (telegram_handle,))
+        
+        # Delete from leave_logs_new table
+        cursor.execute("""
+            DELETE FROM leave_logs_new 
+            WHERE name = (SELECT name FROM interns_new WHERE telegram_handle = %s)
+        """, (telegram_handle,))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Database error when deleting user: {e}")
         return False
     finally:
         if conn:

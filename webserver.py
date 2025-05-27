@@ -12,12 +12,15 @@ app = Flask(__name__)
 # This will be set by the main bot
 bot_context = None
 
+
+# Handling of the leave application response from the email link
 @app.route('/leave-response', methods=['GET'])
 def handle_leave_response():
     """Handle supervisor's approve/reject response from email links"""
     application_id = request.args.get('id')
     action = request.args.get('action')
     
+    # Validate inputs and error handling
     if not bot_context:
         return jsonify({"status": "error", "message": "Bot not initialized"}), 500
         
@@ -25,10 +28,9 @@ def handle_leave_response():
     leave_application = leave_applications.get(application_id)
     
     if not leave_application or leave_application["status"] != "Pending":
-        return jsonify({"status": "error", "message": "Invalid or expired application"}), 400
+        message = "This leave application link is now invalid and has expired."
+        return message, 400, {"Content-Type": "text/html"}
     
-    # intern_data = pd.read_csv("Sample Intern Data.csv")
-    # leave_logs = pd.read_csv("Leave Logs.csv")
 
     # Get Datetime of approval/rejection
     decision_time = datetime.now()
@@ -41,7 +43,6 @@ def handle_leave_response():
         leave_application["status"] = "Approved"
         
         # # Track no pay leaves by month 
-
         # Generate monthly breakdown of no pay leaves
         monthly_breakdown = {}
         current_date = leave_application["start_date"]
@@ -74,7 +75,7 @@ def handle_leave_response():
         remarks_value = remarks.rstrip(", ")
         leave_application["remarks"] = remarks_value
 
-        # Update leave balance if needed (for AL and MC leaves) --> in intern data 
+        # Update leave balance if needed  --> in intern data 
         if leave_application.get("balance_type")=="al_balance" or leave_application.get("balance_type")=="mc_balance" or leave_application.get("balance_type")=="compassionate_balance" or leave_application.get("balance_type")=="oil_balance":
             username = leave_application["username"]
             balance_type = leave_application["balance_type"]
@@ -82,7 +83,7 @@ def handle_leave_response():
             new_balance = leave_application["new_balance"]
             leave_duration = leave_application["leave_duration"]
             print(new_balance,leave_duration)
-            # leave_application["remarks"] = remarks_value  # Add remarks to the application
+            # leave_application["remarks"] = remarks_value  
             
             if update_leave_balance(username, balance_type, leave_duration, taken_type) :
                 print(f"Leave balance updated for {username}.")
@@ -93,16 +94,16 @@ def handle_leave_response():
             taken_type = leave_application["taken_type"]
             update_leave_taken(username, leave_duration, taken_type)  # Update leave taken field in the database
 
-        message=f'You have <b>approved</b> {leave_application["leave_type"]} for {leave_application["employee_name"]} to be taken from {leave_application["start_date"]} to {leave_application["end_date"]}. Duration: {leave_application["leave_duration"]} days. The candidate has been notified.'
+        message=f'You have <b>approved</b> {leave_application["leave_type"]} for {leave_application["employee_name"]} to be taken from {leave_application["start_date"]} to {leave_application["end_date"]}. Duration: {leave_application["leave_duration"]} days. The intern has been notified.'
         
             
 
 
     elif action == "reject":
         leave_application["status"] = "Rejected"
-        message=f'You have <b>rejected</b> {leave_application["leave_type"]} for {leave_application["employee_name"]} to be taken from {leave_application["start_date"]} to {leave_application["end_date"]}. Duration: {leave_application["leave_duration"]} days. The candidate has been notified.'
+        message=f'You have <b>rejected</b> {leave_application["leave_type"]} for {leave_application["employee_name"]} to be taken from {leave_application["start_date"]} to {leave_application["end_date"]}. Duration: {leave_application["leave_duration"]} days. The intern has been notified.'
         
-        # No remarks needed for rejected applications
+        
         
     else:
         return jsonify({"status": "error", "message": "Invalid action"}), 400

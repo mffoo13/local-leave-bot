@@ -5,7 +5,7 @@ version: '3.9'
 services:
   intern_bot:
     build: .
-    container_name: local_intern_bot_app
+    container_name: local_intern_bot_app_git
     ports:
       - "3001:3001"  # Host:Container
     env_file:

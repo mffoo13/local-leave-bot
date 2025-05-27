@@ -7,10 +7,15 @@ from decimal import Decimal
 
 from webserver import run_web_server
 import threading
-from db_utils import get_registered_interns, get_intern_by_telegram, update_leave_balance, save_leave_application, update_leave_taken, cancel_leave_application, get_approved_leaves
+from db_utils import get_registered_interns, get_intern_by_telegram, update_leave_balance, save_leave_application, update_leave_taken, cancel_leave_application, get_approved_leaves,delete_user
 
 from dotenv import load_dotenv
 import os
+
+import uuid
+import time
+from datetime import datetime
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -24,7 +29,7 @@ load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Get registered interns from the database
+# Get registered interns from the database for verification purposes
 registered_interns = get_registered_interns()
 print(f"Loaded {len(registered_interns)} registered interns")
 print(registered_interns)
@@ -32,11 +37,14 @@ print(registered_interns)
 # Initialize the bot with your token (put in env file in the future)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Define the states for the conversation
+# State constants for conversation handler
 LEAVE_TYPE, DAY_PORTION, START_DATE, END_DATE, CONFIRMATION = range(5)  # Reordered states
 CHOOSE_LEAVE_TO_CANCEL, CONFIRM_CANCEL = range(5, 7) 
-DOCUMENT_VERIFICATION = 7  # New state for document verification
-leave_types = ["Annual Leave", "Medical Leave", "No Pay Leave", "Compassionate Leave", "Off in Lieu"]  # Leave types
+DOCUMENT_SUBMISSION = "document_submission"
+
+# Leave types
+leave_types = ["Annual Leave", "Medical Leave", "No Pay Leave", "Compassionate Leave", "Off in Lieu"]  
+
 
 # Function to ensure username is always available
 def ensure_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -58,6 +66,7 @@ def main_menu():
         [InlineKeyboardButton("Submit Documents", url=os.getenv("FORM_URL"))]
     ]
     return InlineKeyboardMarkup(keyboard)
+
 # Function to generate a back button
 def back_button():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back")]])
@@ -75,18 +84,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     intern_info = get_intern_by_telegram(username)
     date_today = date.today()
 
+    # lgoin checks
     """Unregistered interns check"""
-    if username not in registered_interns and intern_info["start_date"] <= date_today <= intern_info["end_date"]:
+    if username not in registered_interns:
         await update.message.reply_text("You are not registered in the system. Please contact HR.")
         return
-    
+
+        # Check if today is before internship start date or after end date
+    elif date_today < intern_info["start_date"]:
+        await update.message.reply_text("Your internship has not started yet. Please contact HR.")
+        return
+    elif date_today > intern_info["end_date"]:
+        await update.message.reply_text("Your internship has ended. Please contact HR.")
+        return
+
+        
     # Store username in context.user_data
     context.user_data["username"] = username  
 
     """Welcome message with buttons"""
     await update.message.reply_text(f"Hello, @{username}!")
     await update.message.reply_text("Welcome to the Leave Management System! Here you can check your leave balance, apply for leave and update your leaves")
-    await update.message.reply_text("You can start using your leaves right from the first day of your internship. Feel free and plan your leaves whenever you want.")
+    await update.message.reply_text("You can start using your leaves right from the first day of your internship. Feel free to plan your leaves whenever you want.")
     await update.message.reply_text("Welcome! Choose an option:", reply_markup=main_menu())
 
 # Function to handle general button clicks outside of conversations
@@ -120,25 +139,25 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None
         else:
             await update.message.reply_text(message)
         return
-
+    
+    # Fetch intern leave balances and approved leaves
     intern_info = get_intern_by_telegram(username)
     approved_leaves = get_approved_leaves(username)
     
     # Retrieve the current leave balance
     al_balance = intern_info["al_balance"]
     mc_balance = intern_info["mc_balance"]
-    compassionate_balance = intern_info["compassionate_balance"]
+    # compassionate_balance = intern_info["compassionate_balance"] --> compassionate leave is by default 3 
     oil_balance = intern_info["oil_balance"]
     
-    # Create the balance message
+    # Create the balance message to show leave balances
     message = f"📊 *YOUR LEAVE BALANCE*\n\n"
     message += f"Annual Leave: *{al_balance}* day(s)\n"
     message += f"Medical Leave: *{mc_balance}* day(s)\n"
-    message += f"Compassionate Leave: *{compassionate_balance}* day(s)\n"
     message += f"Off in Lieu: *{oil_balance}* day(s)\n\n"
     
-    # Add approved upcoming leaves to the message
-    message += "📅 *UPCOMING APPROVED LEAVES*\n\n"
+    # Show upcoming approved leaves
+    message += "👍❤ *UPCOMING APPROVED LEAVES*\n\n"
     
     if not approved_leaves:
         message += "You have no approved upcoming leaves."
@@ -184,8 +203,9 @@ async def apply_leave_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text("You are not registered in the system. Please contact HR.")
         return ConversationHandler.END
     
+    # list out leave types to choose from
     keyboard = [[lt] for lt in leave_types]
-    keyboard.append(["Cancel"])  # Add Cancel button
+    keyboard.append(["Cancel"])  
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
     
     if update.callback_query:
@@ -199,34 +219,40 @@ async def apply_leave_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def leave_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Step 2: Ask for leave duration type (full day or half day)"""
-    # Ensure username is available
-    username = ensure_username(update, context)
     
+    # Get reply from previous step
     user_input = update.message.text
+
+    # Error handling for invalid leave type
+    if user_input not in leave_types and user_input != "Cancel":
+        await update.message.reply_text("Invalid leave type. Please choose a valid leave type.")
+        return LEAVE_TYPE
     
     # Check if user wants to cancel
     if user_input == "Cancel":
         return await cancel(update, context)
     
+    # Store the selected leave type in user_data
     context.user_data["leave_type"] = user_input
     
-    # Check if user selected Medical or Compassionate Leave
+    # Check if user selected Medical or Compassionate Leave to facilitate document submission
     if user_input in ["Medical Leave", "Compassionate Leave"]:
-        # Ask if they have submitted the necessary documents
-        keyboard = [["Yes", "No"], ["Cancel"]]
-        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+        # Create inline keyboard with document submission link and options
+        inline_keyboard = [
+            [InlineKeyboardButton("Submit Documents", url=os.getenv("FORM_URL"))],
+            [InlineKeyboardButton("I have submitted documents - Proceed", callback_data="documents_submitted")],
+            [InlineKeyboardButton("Cancel Application", callback_data="cancel_application")]
+        ]
+        reply_markup = InlineKeyboardMarkup(inline_keyboard)
         
-        if user_input == "Medical Leave":
-            await update.message.reply_text(
-                "Have you submitted the required medical certificate documents?", 
-                reply_markup=reply_markup
-            )
-        else:  # Compassionate Leave
-            await update.message.reply_text(
-                "Have you submitted the required supporting documents for compassionate leave?", 
-                reply_markup=reply_markup
-            )
-        return DOCUMENT_VERIFICATION
+        document_type = "medical certificate" if user_input == "Medical Leave" else "supporting documents"
+        message_text = (
+            f"For {user_input}, you need to submit {document_type}.\n\n"
+            f"Please use the button below to submit your documents, then click 'Proceed' to continue with your application."
+        )
+        
+        await update.message.reply_text(message_text, reply_markup=reply_markup)
+        return DOCUMENT_SUBMISSION
     
     # For other leave types, proceed directly to day portion selection
     keyboard = [["Full Day", "Half Day (AM)", "Half Day (PM)"], ["Cancel"]]
@@ -235,49 +261,47 @@ async def leave_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("Please select leave duration type:", reply_markup=reply_markup)
     return DAY_PORTION
 
-async def document_verification_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle document verification response"""
-    # Ensure username is available
+# Process the document submission callback
+async def document_submission_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle document submission callback"""
+    query = update.callback_query
+    await query.answer()
+    
     username = ensure_username(update, context)
     
-    user_input = update.message.text
-    
-    # Check if user wants to cancel
-    if user_input == "Cancel":
-        return await cancel(update, context)
-    
-    if user_input == "No":
-        leave_type = context.user_data["leave_type"]
-        document_type = "medical certificate" if leave_type == "Medical Leave" else "supporting documents"
+    # If user has submitted documents proceed with leave application
+    if query.data == "documents_submitted":
+        # User has submitted documents, proceed with leave application
+        keyboard = [["Full Day", "Half Day (AM)", "Half Day (PM)"], ["Cancel"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
         
-        await update.message.reply_text(
-            f"You need to submit the required {document_type} before applying for {leave_type}. "
-            f"Please submit the documents through the 'Submit Documents' option in the main menu.",
-            reply_markup=ReplyKeyboardRemove()
-        )
+        await query.edit_message_text("Great! Now please select leave duration type:")
+        await query.message.reply_text("Please select leave duration type:", reply_markup=reply_markup)
+        return DAY_PORTION
+        
+    elif query.data == "cancel_application":
+        # User wants to cancel the application
+        await query.edit_message_text("Leave application cancelled.")
         
         # Return to main menu
-        await update.message.reply_text("Welcome! Choose an option:", reply_markup=main_menu())
+        await query.message.reply_text("Welcome! Choose an option:", reply_markup=main_menu())
         return ConversationHandler.END
     
-    # If user has submitted documents, proceed with the leave application
-    keyboard = [["Full Day", "Half Day (AM)", "Half Day (PM)"], ["Cancel"]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-    
-    await update.message.reply_text("Please select leave duration type:", reply_markup=reply_markup)
-    return DAY_PORTION
+    return DOCUMENT_SUBMISSION
 
 async def day_portion_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Step 3: Based on the day portion, ask for start date"""
     # Ensure username is available
     ensure_username(update, context)
-    
+
+    # Get reply from previous step
     user_input = update.message.text
     
     # Check if user wants to cancel
     if user_input == "Cancel":
         return await cancel(update, context)
     
+    # Save user input for day portion
     context.user_data["day_portion"] = user_input
     
     # Store if this is a half day leave
@@ -355,12 +379,14 @@ async def end_date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     username = ensure_username(update, context)
     intern_info = get_intern_by_telegram(username)
     
+    # Get reply from previous step
     user_input = update.message.text
     
     # Check if user wants to cancel
     if user_input == "Cancel":
         return await cancel(update, context)
     
+    # Validate and save end date
     try:
         end_date_str = user_input
         end_date = datetime.strptime(end_date_str, "%d-%m-%Y").date()
@@ -419,7 +445,21 @@ async def prepare_confirmation(update: Update, context: ContextTypes.DEFAULT_TYP
     day_portion = context.user_data["day_portion"]
     leave_duration = context.user_data["leave_duration"]
 
-    # Check balance and prepare confirmation message
+    # Check if the leave period includes weekends
+    has_weekends = False
+    current_date = start_date
+    while current_date <= end_date:
+        if current_date.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+            has_weekends = True
+            break
+        current_date += timedelta(days=1)
+
+    weekends_message = ""
+    if has_weekends:
+        weekends_message = "\n⚠️ Note: The selected leave period includes weekends. Leave is only counted for weekdays."
+
+
+    # Check balance and prepare confirmation message for AL
     if leave_type == "Annual Leave":
         if leave_duration > al_balance:
             await update.message.reply_text(
@@ -435,13 +475,14 @@ async def prepare_confirmation(update: Update, context: ContextTypes.DEFAULT_TYP
                                 f"Start Date: {start_date.strftime('%d-%m-%Y')}\n"
                                 f"End Date: {end_date.strftime('%d-%m-%Y')}\n"
                                 f"Day Portion: {day_portion}\n"
-                                f"Leave Duration: {leave_duration} day{'s' if leave_duration > 1 else ''}\n"
+                                f"Leave Duration: {leave_duration} day{'s' if leave_duration > 1 else ''}\n {weekends_message}"
                                 f"Remaining AL Balance: {new_balance} days\n\n"
                                 "Do you confirm? (Yes/No)")
         context.user_data["new_balance"] = new_balance
         context.user_data["taken_type"] = "al_taken"
         context.user_data["balance_type"] = "al_balance"
         
+    # Check balance and prepare confirmation message for MC
     elif leave_type == "Medical Leave":
         if leave_duration > mc_balance:
             await update.message.reply_text(
@@ -457,13 +498,14 @@ async def prepare_confirmation(update: Update, context: ContextTypes.DEFAULT_TYP
                                 f"Start Date: {start_date.strftime('%d-%m-%Y')}\n"
                                 f"End Date: {end_date.strftime('%d-%m-%Y')}\n"
                                 f"Day Portion: {day_portion}\n"
-                                f"Leave Duration: {leave_duration} day{'s' if leave_duration > 1 else ''}\n"
+                                f"Leave Duration: {leave_duration} day{'s' if leave_duration > 1 else ''}\n {weekends_message}"
                                 f"Remaining MC Balance: {new_balance} days\n\n"
                                 "Do you confirm? (Yes/No)")
         context.user_data["new_balance"] = new_balance
         context.user_data["taken_type"] = "mc_taken"
         context.user_data["balance_type"] = "mc_balance"
 
+    # Check balance and prepare confirmation message for Compassionate Leave
     elif leave_type == "Compassionate Leave":
         if leave_duration > compassionate_balance:
             await update.message.reply_text(
@@ -479,13 +521,14 @@ async def prepare_confirmation(update: Update, context: ContextTypes.DEFAULT_TYP
                                 f"Start Date: {start_date.strftime('%d-%m-%Y')}\n"
                                 f"End Date: {end_date.strftime('%d-%m-%Y')}\n"
                                 f"Day Portion: {day_portion}\n"
-                                f"Leave Duration: {leave_duration} day{'s' if leave_duration > 1 else ''}\n"
+                                f"Leave Duration: {leave_duration} day{'s' if leave_duration > 1 else ''}\n {weekends_message}"
                                 f"Remaining MC Balance: {new_balance} days\n\n"
                                 "Do you confirm? (Yes/No)")
         context.user_data["new_balance"] = new_balance
         context.user_data["taken_type"] = "compassionate_taken"
         context.user_data["balance_type"] = "compassionate_balance"
 
+    # Check balance and prepare confirmation message for OIL
     elif leave_type == "Off in Lieu":
         if leave_duration > oil_balance:
             await update.message.reply_text(
@@ -501,7 +544,7 @@ async def prepare_confirmation(update: Update, context: ContextTypes.DEFAULT_TYP
                                 f"Start Date: {start_date.strftime('%d-%m-%Y')}\n"
                                 f"End Date: {end_date.strftime('%d-%m-%Y')}\n"
                                 f"Day Portion: {day_portion}\n"
-                                f"Leave Duration: {leave_duration} day{'s' if leave_duration > 1 else ''}\n"
+                                f"Leave Duration: {leave_duration} day{'s' if leave_duration > 1 else ''}\n {weekends_message}"
                                 f"Remaining MC Balance: {new_balance} days\n\n"
                                 "Do you confirm? (Yes/No)")
         context.user_data["new_balance"] = new_balance
@@ -519,10 +562,7 @@ async def prepare_confirmation(update: Update, context: ContextTypes.DEFAULT_TYP
         # Set appropriate taken_type based on leave type
         if leave_type == "No Pay Leave":
             context.user_data["taken_type"] = "npl_taken"
-        # elif leave_type == "Compassionate Leave":
-        #     context.user_data["taken_type"] = "compassionate_taken"
-        # elif leave_type == "Off in Lieu":
-        #     context.user_data["taken_type"] = "oil_taken"
+
             
         context.user_data["balance_type"] = ""
 
@@ -532,6 +572,7 @@ async def prepare_confirmation(update: Update, context: ContextTypes.DEFAULT_TYP
     
     return CONFIRMATION
 
+# Modified confirmation_handler function with better ID generation
 async def confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Step 5: Finalize the leave application and send email to supervisor"""
     # Ensure username is available
@@ -541,6 +582,7 @@ async def confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                                        reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
     
+    # Save user input for confirmation
     user_message = update.message.text
     
     # Check if user wants to cancel
@@ -548,12 +590,15 @@ async def confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return await cancel(update, context)
     
     if user_message.lower() == "yes":
-        # Generate a unique application ID
-        application_id = str(uuid.uuid4())
+        # Generate a MORE unique application ID using timestamp + uuid
+        timestamp = str(int(time.time()))
+        unique_id = str(uuid.uuid4())[:8]  # Use first 8 characters of UUID
+        application_id = f"{timestamp}_{unique_id}_{username}"
+        
+        print(f"Generated application ID: {application_id}")  # Debug logging
         
         # Get intern leave balance from database
-        intern_info= get_intern_by_telegram(username)
-        # Store leave application details in database/dictionary for tracking
+        intern_info = get_intern_by_telegram(username)
         employee_name = intern_info["name"]
         supervisor_email = intern_info["supervisor_email"]
 
@@ -573,37 +618,49 @@ async def confirmation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "balance_type": context.user_data.get("balance_type"),
             "new_balance": context.user_data.get("new_balance"),
             "taken_type": context.user_data.get("taken_type"),
-            "remarks": ""  # Placeholder for remarks
+            "remarks": ""
         }
 
-        print(leave_application)
+        print(f"Created leave application: {leave_application}")
         
-        # Store in global dictionary or database
-        # This would typically be stored in a database in production
-        if not hasattr(context.bot_data, 'leave_applications'):
+        # Initialize leave_applications if it doesn't exist or get cancelled
+        if 'leave_applications' not in context.bot_data:
             context.bot_data['leave_applications'] = {}
+        
+        # Store the application
         context.bot_data['leave_applications'][application_id] = leave_application
         
-        # Send email to supervisor with approval/rejection links
-        await send_supervisor_email(application_id, leave_application, supervisor_email)
+        # Debug: Print all stored applications (for testing purposes) --> can be removed later
+        print(f"Total stored applications: {len(context.bot_data['leave_applications'])}")
+        for app_id, app in context.bot_data['leave_applications'].items():
+            print(f"App ID: {app_id}, Status: {app['status']}")
         
-        # Schedule job to auto-approve after 3 days
+        # Send email to supervisor with approval/rejection links
+        email_sent = await send_supervisor_email(application_id, leave_application, supervisor_email)
+        
+        if not email_sent:
+            await update.message.reply_text("Failed to send email to supervisor. Please try again later.")
+            return ConversationHandler.END
+        
+        # Schedule job to auto-approve after 3 days (simulated 15 minutes for testing)
         job_queue = context.job_queue
         job_queue.run_once(
             auto_approve_leave,
-            when=timedelta(minutes=15),
+            when=timedelta(minutes=15),  # Change back to days=3 for production
             data={"application_id": application_id, "chat_id": update.effective_chat.id},
             name=f"auto_approve_{application_id}"
         )
         
         await update.message.reply_text(
-            "Your leave application has been submitted and sent to your supervisor for approval.\n"
+            f"Your leave application has been submitted and sent to your supervisor for approval.\n"
             "If your supervisor does not respond within 3 days, it will be automatically approved.",
             reply_markup=ReplyKeyboardRemove()
         )
 
-        if leave_application["leave_type"] == "Compassionate Leave" or leave_application["leave_type"] == "Medical Leave":
-            await update.message.reply_text(f"Do Remember to submit the official documents for your leave application through the submit documents button in the main menu once your leave has been approved.")
+        # if leave_application["leave_type"] in ["Compassionate Leave", "Medical Leave"]:
+        #     await update.message.reply_text(
+        #         "Remember to submit the official documents for your leave application through the submit documents button in the main menu once your leave has been approved."
+        #     )
     else:
         await update.message.reply_text("Leave application cancelled.", reply_markup=ReplyKeyboardRemove())
 
@@ -632,7 +689,7 @@ async def send_supervisor_email(application_id, leave_application, supervisor_em
         
         # Email content with approval/rejection links
         # Note: In production, these would be secure links to your application server
-        base_url = "http://127.0.0.1:3001/leave-response"
+        base_url ="http://127.0.0.1:3001/leave-response"
         approve_url = f"{base_url}?id={application_id}&action=approve"
         reject_url = f"{base_url}?id={application_id}&action=reject"
         
@@ -725,7 +782,7 @@ async def auto_approve_leave(context):
             remarks_value = remarks.rstrip(", ")
             
         # Update leave balance if needed (for AL and MC leaves) --> in intern data 
-        if leave_application.get("balance_type")=="al_balance" or leave_application.get("balance_type")=="mc_balance" or leave_application.get("balance_type")=="compassionate_balance":
+        if leave_application.get("balance_type")=="al_balance" or leave_application.get("balance_type")=="mc_balance" or leave_application.get("balance_type")=="compassionate_balance" or leave_application.get("balance_type")=="oil_balance":
             username = leave_application["username"]
             balance_type = leave_application["balance_type"]
             taken_type = leave_application["taken_type"]
@@ -816,9 +873,7 @@ async def cancel_leave_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     # Get approved leaves from the database
     approved_leaves = get_approved_leaves(username)
-    print("approved_leaves",flush=True)
-    print(approved_leaves,flush=True)
-    
+
     if not approved_leaves:
         message = "You don't have any upcoming approved leaves to cancel."
         if update.callback_query:
@@ -858,6 +913,7 @@ async def cancel_leave_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     return CHOOSE_LEAVE_TO_CANCEL
 
+# Function to choose leave to cancel
 async def choose_leave_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle the selection of which leave to cancel"""
     user_input = update.message.text
@@ -929,6 +985,7 @@ async def choose_leave_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     
     return CONFIRM_CANCEL
 
+# Confirmation notification handler for leave cancellation
 async def confirm_cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle the confirmation of leave cancellation"""
     username = ensure_username(update, context)
@@ -966,6 +1023,7 @@ async def confirm_cancel_handler(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text("Welcome! Choose an option:", reply_markup=main_menu())
     return ConversationHandler.END
 
+# Alerting supervisor about leave cancellation
 async def notify_supervisor_of_cancellation(leave_details, username):
     """Send an email to the supervisor about the leave cancellation"""
     try:
@@ -1032,12 +1090,14 @@ async def notify_supervisor_of_cancellation(leave_details, username):
 # Section 5: Main Function
 # --------------------------------------
 
+# cacnel function to go back to main menu
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel the conversation."""
     await update.message.reply_text("Leave application cancelled.", reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text("Welcome! Choose an option:", reply_markup=main_menu())
     return ConversationHandler.END
 
+# Main function to start the bot and set up handlers
 def main() -> None:
     """Main function to start the bot"""
     application = Application.builder().token(BOT_TOKEN).build()
@@ -1053,15 +1113,15 @@ def main() -> None:
             CommandHandler("applyleave", apply_leave_start),
             CallbackQueryHandler(apply_leave_start, pattern="^apply_leave$")
         ],
-        states={
-            LEAVE_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, leave_type_handler)],
-            DOCUMENT_VERIFICATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, document_verification_handler)],
-            DAY_PORTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, day_portion_handler)],
-            START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_date_handler)],
-            END_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, end_date_handler)],
-            CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmation_handler)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
+    states={
+        LEAVE_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, leave_type_handler)],
+        DOCUMENT_SUBMISSION: [CallbackQueryHandler(document_submission_handler)],
+        DAY_PORTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, day_portion_handler)],
+        START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_date_handler)],
+        END_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, end_date_handler)],
+        CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmation_handler)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel)],
     )
 
     # Add the new cancel leave conversation handler
