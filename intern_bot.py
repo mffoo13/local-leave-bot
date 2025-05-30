@@ -689,7 +689,7 @@ async def send_supervisor_email(application_id, leave_application, supervisor_em
         
         # Email content with approval/rejection links
         # Note: In production, these would be secure links to your application server
-        base_url ="http://127.0.0.1:3001/leave-response"
+        base_url = "http://127.0.0.1:3000/leave-response"
         approve_url = f"{base_url}?id={application_id}&action=approve"
         reject_url = f"{base_url}?id={application_id}&action=reject"
         
@@ -745,7 +745,102 @@ async def auto_approve_leave(context):
     leave_application = leave_applications.get(application_id)
     
     if leave_application and leave_application["status"] == "Pending":
-        # Update leave status to Approved
+        # **NEW: Check current balance before auto-approving**
+        username = leave_application["username"]
+        intern_info = get_intern_by_telegram(username)
+        leave_duration = leave_application["leave_duration"]
+        leave_type = leave_application["leave_type"]
+        
+        # Check if this is a leave type that requires balance verification
+        balance_check_failed = False
+        insufficient_balance_message = ""
+        
+        if leave_type == "Annual Leave":
+            current_balance = intern_info["al_balance"]
+            if leave_duration > current_balance:
+                balance_check_failed = True
+                insufficient_balance_message = f"Annual Leave balance insufficient. Current: {current_balance} days, Required: {leave_duration} days."
+                
+        elif leave_type == "Medical Leave":
+            current_balance = intern_info["mc_balance"]
+            if leave_duration > current_balance:
+                balance_check_failed = True
+                insufficient_balance_message = f"Medical Leave balance insufficient. Current: {current_balance} days, Required: {leave_duration} days."
+                
+        elif leave_type == "Compassionate Leave":
+            current_balance = intern_info["compassionate_balance"]
+            if leave_duration > current_balance:
+                balance_check_failed = True
+                insufficient_balance_message = f"Compassionate Leave balance insufficient. Current: {current_balance} days, Required: {leave_duration} days."
+                
+        elif leave_type == "Off in Lieu":
+            current_balance = intern_info["oil_balance"]
+            if leave_duration > current_balance:
+                balance_check_failed = True
+                insufficient_balance_message = f"Off in Lieu balance insufficient. Current: {current_balance} days, Required: {leave_duration} days."
+        
+        # If balance check failed, reject the application automatically
+        if balance_check_failed:
+            leave_application["status"] = "Auto-Rejected"
+            leave_application["decision_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            leave_application["remarks"] = f"Auto-rejected due to insufficient balance: {insufficient_balance_message}"
+            
+            # Save the rejected application
+            save_leave_application(leave_application)
+            
+            # Notify the employee about auto-rejection
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Your leave application has been automatically rejected due to insufficient balance. {insufficient_balance_message}"
+            )
+            
+            # Notify the supervisor about auto-rejection
+            try:
+                import smtplib
+                from email.mime.text import MIMEText
+                from email.mime.multipart import MIMEMultipart
+                    
+                supervisor_email = intern_info["supervisor_email"]
+                sender_email = os.getenv('SENDER_EMAIL')
+                sender_password = os.getenv('SENDER_PASSWORD')
+                
+                msg = MIMEMultipart()
+                msg['From'] = sender_email
+                msg['To'] = supervisor_email
+                msg['Subject'] = f"Leave Application from {leave_application['employee_name']} (Auto-Rejected)"
+                
+                body = f"""
+                Dear Supervisor,
+                
+                The following leave application has been automatically rejected due to insufficient balance:
+                
+                Employee: {leave_application['employee_name']}
+                Leave Type: {leave_application['leave_type']}
+                Start Date: {leave_application['start_date'].strftime('%d-%m-%Y')}
+                End Date: {leave_application['end_date'].strftime('%d-%m-%Y')}
+                Day Portion: {leave_application['day_portion']}
+                Duration: {leave_application['leave_duration']} day{'s' if leave_application['leave_duration'] > 1 else ''}
+                
+                Reason: {insufficient_balance_message}
+                
+                The employee has been notified of this rejection.
+                
+                This is an automated message from the Leave Management System.
+                """
+                
+                msg.attach(MIMEText(body, 'plain'))
+                
+                with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                    server.starttls()
+                    server.login(sender_email, sender_password)
+                    server.send_message(msg)
+                    
+            except Exception as e:
+                print(f"Failed to send auto-rejection notification to supervisor: {str(e)}")
+            
+            return  # Exit function after auto-rejection
+        
+        # If balance check passed, proceed with auto-approval
         leave_application["status"] = "Auto-Approved"
         leave_application["approval_date"] = datetime.now()
         leave_application["decision_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -810,18 +905,15 @@ async def auto_approve_leave(context):
         )
         
         # Notify the supervisor (optional)
-        intern_info = get_intern_by_telegram(username)
-        supervisor_email = intern_info["supervisor_email"]
-        
         try:
             # Send notification email to supervisor
             import smtplib
             from email.mime.text import MIMEText
             from email.mime.multipart import MIMEMultipart
                 
-            # Email configuration
-            sender_email = os.getenv('SENDER_EMAIL') # Replace with your email
-            sender_password = os.getenv('SENDER_PASSWORD')  # Replace with your password or app password
+            supervisor_email = intern_info["supervisor_email"]
+            sender_email = os.getenv('SENDER_EMAIL')
+            sender_password = os.getenv('SENDER_PASSWORD')
             
             # Create message
             msg = MIMEMultipart()

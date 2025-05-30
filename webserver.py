@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from db_utils import get_registered_interns, get_intern_by_telegram, update_leave_balance, save_leave_application, update_leave_taken
 import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # Add these imports
+from decimal import Decimal
 
 
 app = Flask(__name__)
@@ -40,6 +41,91 @@ def handle_leave_response():
 
     # Update status based on action
     if action == "approve":
+
+        # **Check current balance before approving**
+        username = leave_application["username"]
+        intern_info = get_intern_by_telegram(username)
+        leave_duration = leave_application["leave_duration"]
+        leave_type = leave_application["leave_type"]
+        
+        # Check if this is a leave type that requires balance verification
+        balance_check_failed = False
+        insufficient_balance_message = ""
+        
+        if leave_type == "Annual Leave":
+            current_balance = intern_info["al_balance"]
+            if leave_duration > current_balance:
+                balance_check_failed = True
+                insufficient_balance_message = f"Annual Leave balance insufficient. Current: {current_balance} days, Required: {leave_duration} days."
+                
+        elif leave_type == "Medical Leave":
+            current_balance = intern_info["mc_balance"]
+            if leave_duration > current_balance:
+                balance_check_failed = True
+                insufficient_balance_message = f"Medical Leave balance insufficient. Current: {current_balance} days, Required: {leave_duration} days."
+                
+        elif leave_type == "Compassionate Leave":
+            current_balance = intern_info["compassionate_balance"]
+            if leave_duration > current_balance:
+                balance_check_failed = True
+                insufficient_balance_message = f"Compassionate Leave balance insufficient. Current: {current_balance} days, Required: {leave_duration} days."
+                
+        elif leave_type == "Off in Lieu":
+            current_balance = intern_info["oil_balance"]
+            if leave_duration > current_balance:
+                balance_check_failed = True
+                insufficient_balance_message = f"Off in Lieu balance insufficient. Current: {current_balance} days, Required: {leave_duration} days."
+        
+        # If balance check failed, reject the application automatically
+        if balance_check_failed:
+            leave_application["status"] = "Rejected"
+            leave_application["remarks"] = f"Auto-rejected due to insufficient balance: {insufficient_balance_message}"
+            
+            # Save the rejected application
+            save_leave_application(leave_application)
+            
+            # Cancel auto-approval job
+            job_queue = bot_context.job_queue
+            current_jobs = job_queue.get_jobs_by_name(f"auto_approve_{application_id}")
+            for job in current_jobs:
+                job.schedule_removal()
+            
+            # Notify employee about rejection due to insufficient balance
+            if 'chat_id' in leave_application:
+                try:
+                    asyncio.run(
+                        bot_context.bot.send_message(
+                            chat_id=leave_application["chat_id"],
+                            text=f"Your {leave_application.get('leave_type', 'Unknown')} from {leave_application['start_date']} to {leave_application['end_date']} has been rejected due to insufficient balance. {insufficient_balance_message}"
+                        )
+                    )
+                    
+                    # Send main menu
+                    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                    
+                    keyboard = [
+                        [InlineKeyboardButton("Check Leave Balance", callback_data="balance")],
+                        [InlineKeyboardButton("Apply for Leave", callback_data="apply_leave")],
+                        [InlineKeyboardButton("Cancel Leave", callback_data="cancel_leave")],
+                        [InlineKeyboardButton("Submit Documents", url=os.getenv("FORM_URL"))]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    asyncio.run(
+                        bot_context.bot.send_message(
+                            chat_id=leave_application["chat_id"],
+                            text="Welcome! Choose an option:",
+                            reply_markup=reply_markup
+                        )
+                    )
+                except Exception as e:
+                    print(f"Failed to notify employee about balance rejection: {e}")
+            
+            # Return message to supervisor
+            message = f'Leave application for {leave_application["employee_name"]} has been <b>automatically rejected</b> due to insufficient balance. {insufficient_balance_message} The intern has been notified.'
+            return message, 200, {"Content-Type": "text/html"}
+        
+        # If balance check passed, proceed with approval
         leave_application["status"] = "Approved"
         
         # # Track no pay leaves by month 
